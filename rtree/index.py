@@ -268,16 +268,21 @@ class Index(object):
         else:
             raise IOError, "Unclosable index"
 
-    def get_coordinate_pointers(self, coordinates):
+    def get_coordinate_pointers(self, coordinates, segment=False):
+        """
+        Convert coordinates into ctypes appropriate for passing to library
+        if segment=False, then coordinates represent a bbox, otherwise
+        they represent a segment
+        """
 
         try:
             iter(coordinates)
         except TypeError:
-            raise TypeError('Bounds must be a sequence')
+            raise TypeError('Coordinates must be a sequence')
         dimension = self.properties.dimension
 
-        mins = ctypes.c_double * dimension
-        maxs = ctypes.c_double * dimension
+        pt1 = ctypes.c_double * dimension
+        pt2 = ctypes.c_double * dimension
 
         if not self.interleaved:
             coordinates = Index.interleave(coordinates)
@@ -288,20 +293,21 @@ class Index(object):
 
         if len(coordinates) != dimension * 2:
             raise core.RTreeError("Coordinates must be in the form "
-                                    "(minx, miny, maxx, maxy) or (x, y) for 2D indexes")
+                                    "(pt1x, pt1y, pt2x, pt2y) or (x, y) for 2D indexes")
 
-        # so here all coords are in the form:
-        # [xmin, ymin, zmin, xmax, ymax, zmax]
-        for i in range(dimension):
-            if not coordinates[i] <= coordinates[i + dimension]:
-                raise core.RTreeError("Coordinates must not have minimums more than maximums")
+        if not segment:
+            # so here all coords are in the form:
+            # [xmin, ymin, zmin, xmax, ymax, zmax]
+            for i in range(dimension):
+                if not coordinates[i] <= coordinates[i + dimension]:
+                    raise core.RTreeError("Coordinates must not have minimums more than maximums")
 
-        p_mins = mins(*[ctypes.c_double(\
+        p_pt1 = pt1(*[ctypes.c_double(\
                             coordinates[i]) for i in range(dimension)])
-        p_maxs = maxs(*[ctypes.c_double(\
+        p_pt2 = pt2(*[ctypes.c_double(\
                         coordinates[i + dimension]) for i in range(dimension)])
 
-        return (p_mins, p_maxs)
+        return (p_pt1, p_pt2)
 
     def _serialize(self, obj):
         serialized = self.dumps(obj)
@@ -383,7 +389,7 @@ class Index(object):
 
         return p_num_results.value
 
-    def intersection(self, coordinates, objects=False):
+    def intersection(self, coordinates, objects=False, segment=False):
         """Return ids or objects in the index that intersect the given coordinates.
 
         :param coordinates: sequence or array
@@ -397,6 +403,12 @@ class Index(object):
             were pickled when they were stored with each index entry, as well
             as the id and bounds of the index entries. If 'raw', the objects
             will be returned without the :class:`rtree.index.Item` wrapper.
+
+        :param segment:  True or False
+            If True, treat the coordinates as a segment to be used as a test 
+            for segment intersection with the bounds of each index node. 
+            If False (default), the coordinates represent a bounding box
+            to be used to intersect with the bounds of each index node.
 
         The following example queries the index for any objects any objects
         that were stored in the index intersect the bounds given in the coordinates::
@@ -418,36 +430,56 @@ class Index(object):
 
         """
 
-        if objects: return self._intersection_obj(coordinates, objects)
+        if objects: return self._intersection_obj(coordinates, objects, segment)
 
-        p_mins, p_maxs = self.get_coordinate_pointers(coordinates)
+        p_pt1, p_pt2 = self.get_coordinate_pointers(coordinates, segment)
 
         p_num_results = ctypes.c_uint64(0)
 
         it = ctypes.pointer(ctypes.c_int64())
 
-        core.rt.Index_Intersects_id(    self.handle,
-                                        p_mins,
-                                        p_maxs,
-                                        self.properties.dimension,
-                                        ctypes.byref(it),
-                                        ctypes.byref(p_num_results))
+        if not segment:
+            core.rt.Index_Intersects_id(    self.handle,
+                                            p_pt1,
+                                            p_pt2,
+                                            self.properties.dimension,
+                                            ctypes.byref(it),
+                                            ctypes.byref(p_num_results))
+        else:
+            core.rt.Index_SegmentIntersects_id(    self.handle,
+                                                   p_pt1,
+                                                   p_pt2,
+                                                   self.properties.dimension,
+                                                   ctypes.byref(it),
+                                                   ctypes.byref(p_num_results))
+
         return self._get_ids(it, p_num_results.value)
 
-    def _intersection_obj(self, coordinates, objects):
 
-        p_mins, p_maxs = self.get_coordinate_pointers(coordinates)
+    def _intersection_obj(self, coordinates, objects, segment=False):
+
+        p_pt1, p_pt2 = self.get_coordinate_pointers(coordinates, segment)
 
         p_num_results = ctypes.c_uint64(0)
 
         it = ctypes.pointer(ctypes.c_void_p())
 
-        core.rt.Index_Intersects_obj(   self.handle,
-                                        p_mins,
-                                        p_maxs,
-                                        self.properties.dimension,
-                                        ctypes.byref(it),
-                                        ctypes.byref(p_num_results))
+        if not segment:
+            core.rt.Index_Intersects_obj(   self.handle,
+                                            p_pt1,
+                                            p_pt2,
+                                            self.properties.dimension,
+                                            ctypes.byref(it),
+                                            ctypes.byref(p_num_results))
+
+        else:
+            core.rt.Index_SegmentIntersects_obj(   self.handle,
+                                                   p_pt1,
+                                                   p_pt2,
+                                                   self.properties.dimension,
+                                                   ctypes.byref(it),
+                                                   ctypes.byref(p_num_results))
+
         return self._get_objects(it, p_num_results.value, objects)
 
     def _get_objects(self, it, num_results, objects):
